@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit
 
 from feature_extraction.common import read_table
+from training.evaluation import evaluate_holdout
 
 
 FEATURE_PREFIXES = ("cb_", "mf_", "img_")
@@ -75,6 +76,7 @@ def train_classifier(
     redundancy_offset: float = 0.1,
     mixup_alpha: float = 0.4,
     mixup_multiplier: float = 5.0,
+    hit_label: int = 1,
 ) -> Path:
     """Train with PyCaret, evaluate a held-out group split, and save artifacts."""
     if jobs < 1 or folds < 2:
@@ -83,6 +85,8 @@ def train_classifier(
         raise ValueError("protocol must be baseline, scaffold, or manuscript")
     if supplementary_boost < 1:
         raise ValueError("supplementary_boost must be at least 1")
+    if hit_label not in (0, 1):
+        raise ValueError("hit_label must be 0 or 1")
     if test_size is None:
         test_size = 0.05 if protocol in {"scaffold", "manuscript"} else 0.2
     if model_name is None:
@@ -181,13 +185,19 @@ def train_classifier(
     exp.pull().to_csv(output_dir / "cross_validation.csv", index=False)
     exp.predict_model(best, verbose=False)
     exp.pull().to_csv(output_dir / "holdout_metrics.csv", index=False)
-    predictions = exp.predict_model(best, data=holdout.drop(columns=target), verbose=False)
+    predictions = exp.predict_model(
+        best, data=holdout.drop(columns=target), raw_score=True, verbose=False,
+    )
     predictions = predictions.reset_index(drop=True)
     if len(predictions) != len(holdout):
         raise RuntimeError("PyCaret returned a different number of holdout predictions")
     predictions.insert(0, "row_id", row_ids.iloc[test_idx].to_numpy())
     predictions.insert(1, "activity", holdout[target].to_numpy())
     predictions.to_csv(output_dir / "holdout_predictions.csv", index=False)
+    hit_metrics = evaluate_holdout(predictions, hit_label=hit_label)
+    hit_metrics.to_csv(output_dir / "holdout_hit_metrics.csv", index=False)
+    print("Holdout hit metrics:")
+    print(hit_metrics.to_string(index=False))
     exp.save_model(best, str(output_dir / "model"), verbose=False)
     metadata = {
         "model_requested": model_name, "protocol": protocol,
@@ -195,6 +205,7 @@ def train_classifier(
         "train_rows": len(train), "test_rows": len(holdout),
         "features": list(features.columns), "folds": int(cv_folds),
         "seed": seed, "jobs": jobs, "test_size": test_size,
+        "hit_label": hit_label,
         "train_hits": int(train[target].sum()), "test_hits": int(holdout[target].sum()),
         "supplementary_column": supplementary_column, "supplementary_boost": supplementary_boost,
         "redundancy_offset": redundancy_offset if protocol == "manuscript" else None,

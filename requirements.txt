@@ -1,5 +1,6 @@
 # Python 3.11 recommended. Install inside a clean virtual environment.
 pandas>=2.0,<3
+openpyxl>=3.1,<4
 numpy>=1.24,<2
 rdkit>=2023.9
 torch>=2.2,<3

@@ -14,6 +14,8 @@ Use Python 3.11 in a clean environment, then:
 python -m pip install -r requirements.txt
 ```
 
+`openpyxl` is required to read the 2024 Excel file.
+
 The first embedding command downloads pretrained model weights from Hugging
 Face. MoLFormer loads model code from its publisher (`trust_remote_code=True`)
 and selects its Transformers 4 compatibility revision. Review the model repo if
@@ -21,18 +23,62 @@ your environment has restrictions on executing downloaded code.
 
 ## 1. Preprocess the CSV
 
+### Two yearly compound screening files
+
+The 2024 Excel input should have `Compound ID`, `Barcode`, `Well`, `SMILES`,
+`infected cells / number of cells (%)`, and `cellratio(%)` columns. The 2025
+CSV uses `Compound_ID` for the compound identifier; the other five headings
+are the same. Read, align, concatenate, standardize SMILES, and label both
+thresholds with:
+
+```bash
+python Main/main.py preprocess-screening \
+  --input-2024 Data/OMICRON_2024_cpd.xlsx \
+  --input-2025 Data/OMICRON_2025_cpd.csv \
+  --target hit70 \
+  --output Data/processed.csv \
+  --combined-output Data/compound_screening_results.csv
+```
+
+Replace the two input filenames with your actual filenames. Missing, blank,
+and `--` SMILES are removed before assigning `row_id`. Well names such as
+`A01` become `A1`; the original years, plate, well, and (if present) compound
+ID remain in the output. `hit70=1` means **both** `infection_percentage > 70`
+and `cell_percentage > 70`; `hit50=1` means **both** are `> 50`. Equality at
+70 or 50 is not a hit. Missing or nonnumeric measurements result in missing
+hit labels, rather than 0. `activity` copies `hit70` by default for downstream
+training. Use `--target hit50` to train on `hit50` (prefer a different
+`--output` name if retaining both analyses). `Data/invalid_smiles.csv` lists
+rows whose nonempty SMILES RDKit cannot standardize.
+
+For these new inputs, continue with:
+
+```bash
+python Main/main.py embed-molecular --input Data/processed.csv --model chemberta --batch-size 16
+python Main/main.py assemble --input Data/processed.csv --molecular chemberta --compound-column compound_id
+python Main/main.py train --input Data/features/chemberta.parquet --protocol baseline --model xgboost --jobs 1 --output-dir Data/models/hit70_baseline
+```
+
+The numeric assay columns, hit labels, and compound ID do not enter the
+predictor matrix; only embeddings are used. If you change only `--target`,
+reuse the molecular embeddings and rerun `assemble` and `train` with separately
+named feature/model outputs. These labels use the **high infection** rule you
+specified; confirm that this agrees with your biological definition of a hit.
+
+### Older single CSV format
+
 Put `combined_df.csv` in `Data/` with a `SMILES` column and an
 `infected cells / number of cells (%)` column. Then run:
 
 ```bash
-python Main/main.py preprocess --input Data/combined_df.csv --threshold 70
+python Main/main.py preprocess --input Data/combined_df.csv --threshold 70 --positive-if below
 ```
 
 If your prompt currently ends in `Main %` and the source is at
 `Main/Data/combined_df.csv`, run from there:
 
 ```bash
-python main.py preprocess --input Data/combined_df.csv --threshold 70
+python main.py preprocess --input Data/combined_df.csv --threshold 70 --positive-if below
 ```
 
 Outputs and the following stage defaults will use that same `Main/Data/` folder.
@@ -45,6 +91,12 @@ label is **1 when infected-cell percentage is >= 70**. If `1` should mean
 *low infection*, use `--positive-if below`. The threshold is inclusive in
 both cases. Review whether the measured column is infection or inhibition
 before interpreting model predictions.
+
+For antiviral hit prediction from an *infected cell percentage*, use
+`--positive-if below` so `activity=1` means low infection. The default
+`--positive-if above` assigns `1` to high infection and is appropriate only
+when that is the class you intend to predict. Decide the assay hit threshold
+from the experimental protocol before training.
 
 If there is exactly one source CSV in `Data/`, `python Main/main.py` still
 runs preprocessing. The earlier `python Main/main.py --input ...` works too.
@@ -85,7 +137,7 @@ For three ChemBERTa/XGBoost experiments from the project root, run the
 preprocessing and embedding stages once, then train each protocol separately:
 
 ```bash
-python Main/main.py preprocess --input Data/combined_df.csv --threshold 70
+python Main/main.py preprocess --input Data/combined_df.csv --threshold 70 --positive-if below
 python Main/main.py embed-molecular --model chemberta --batch-size 16
 python Main/main.py assemble --molecular chemberta
 
@@ -104,6 +156,32 @@ its hyperparameters differ from PyCaret's default XGBoost classifier, so the
 scaffold/manuscript comparison does not isolate augmentation alone.
 Check whether `--positive-if above` (default) matches the assay definition;
 use `--positive-if below` during preprocessing if lower infection means hit.
+
+Each training run prints holdout metrics and writes `holdout_hit_metrics.csv`:
+F1, Precision, Recall, Accuracy, PR-AUC (sklearn Average Precision), ROC-AUC,
+Balanced Accuracy, and confusion-matrix counts. These are computed for
+`--hit-label 1` by default using `prediction_score_1` from PyCaret's
+`raw_score=True` output, saved in `holdout_predictions.csv`. If using an
+existing feature table where `activity=0` means hit, supply `--hit-label 0`
+to measure hits correctly. The manuscript protocol's augmentation always
+operates on class 1, so reprocess with `--positive-if below` before using it
+for hit prediction. Embeddings do not need regeneration when only labels change;
+rerun `assemble` and `train`.
+The screenshot's `tau*` is a selected decision threshold, not an evaluation
+metric. This implementation reports PyCaret's default classification threshold
+(normally 0.5); matching `tau*` would require tuning the threshold on training
+folds only, before evaluating the held-out test set.
+
+To inspect a finished baseline run for sample overlap, label misalignment,
+and an inflated F1 from an imbalanced positive class, run:
+
+```bash
+python Main/main.py audit --input Data/features/chemberta.parquet --run-dir Data/models/chemberta_baseline
+```
+
+This writes `leakage_audit.json` alongside the model. Zero overlaps and label
+mismatches rule out direct row/SMILES reuse in that saved split; they cannot
+rule out related compounds, batch effects, or data provenance problems.
 
 Choose any available modalities:
 

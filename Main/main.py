@@ -59,7 +59,8 @@ def process_data(
     threshold: float = 70,
     smiles_column: str = "SMILES",
     activity_column: str = DEFAULT_ACTIVITY_COLUMN,
-    positive_if: str = "below",
+    positive_if: str = "above",
+    screening_target: str | None = None,
 ) -> pd.DataFrame:
     """Normalise SMILES, label activity, and retain a stable source row ID."""
     from processing.normalisation import normalise_dataframe
@@ -72,6 +73,7 @@ def process_data(
     return normalise_dataframe(
         source, threshold=threshold, smiles_column=smiles_column,
         activity_column=activity_column, positive_if=positive_if,
+        screening_target=screening_target,
     )
 
 
@@ -88,7 +90,7 @@ def run_pipeline(
     threshold: float = 70,
     smiles_column: str = "SMILES",
     activity_column: str = DEFAULT_ACTIVITY_COLUMN,
-    positive_if: str = "below",
+    positive_if: str = "above",
 ) -> pd.DataFrame:
     """Read, normalise, label, save, and return the processed CSV."""
     df = read_csv(find_input_csv() if input_path is None else input_path)
@@ -98,6 +100,34 @@ def run_pipeline(
     )
     save_csv(result, output_path)
     return result
+
+
+def run_screening_pipeline(
+    input_2024: str | Path,
+    input_2025: str | Path,
+    output_path: str | Path = DEFAULT_OUTPUT,
+    *,
+    target: str = "hit70",
+    combined_output: str | Path | None = None,
+) -> pd.DataFrame:
+    """Merge the two screens, normalize SMILES, label both hits, and save."""
+    from processing.load_screening import load_screening_data
+
+    combined = load_screening_data(input_2024, input_2025)
+    if combined_output is not None:
+        save_csv(combined, combined_output)
+    result = process_data(combined, smiles_column="smiles", screening_target=target)
+    save_csv(result, output_path)
+    return result
+
+
+def report_preprocessing(result: pd.DataFrame, output: str | Path,
+                         invalid_output: str | Path) -> None:
+    save_csv(result.loc[result["standardized_smiles"].isna()], invalid_output)
+    labels = result["activity"].value_counts(dropna=False).to_dict()
+    print(f"Saved {len(result)} rows to {output}; "
+          f"invalid SMILES: {result['standardized_smiles'].isna().sum()} "
+          f"(see {invalid_output}); activity counts: {labels}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,8 +141,18 @@ def build_parser() -> argparse.ArgumentParser:
     preprocess.add_argument("--threshold", type=float, default=70)
     preprocess.add_argument("--smiles-column", default="SMILES")
     preprocess.add_argument("--activity-column", default=DEFAULT_ACTIVITY_COLUMN)
-    preprocess.add_argument("--positive-if", choices=["above", "below"], default="below",
+    preprocess.add_argument("--positive-if", choices=["above", "below"], default="above",
                             help="Label 1 for percentages >= or <= threshold")
+
+    screening = commands.add_parser("preprocess-screening",
+                                    help="Merge 2024 Excel + 2025 CSV; label hit70 and hit50")
+    screening.add_argument("--input-2024", required=True, help="2024 compound screening .xlsx")
+    screening.add_argument("--input-2025", required=True, help="2025 compound screening .csv")
+    screening.add_argument("--target", choices=["hit70", "hit50"], default="hit70",
+                           help="Which hit flag to copy into activity (default: hit70)")
+    screening.add_argument("--output", default=DEFAULT_OUTPUT, help="Default: Data/processed.csv")
+    screening.add_argument("--combined-output", help="Optional merged raw CSV before SMILES normalization")
+    screening.add_argument("--invalid-output", help="Default: invalid_smiles.csv beside processed.csv")
 
     molecular = commands.add_parser("embed-molecular", help="SMILES embeddings")
     molecular.add_argument("--input", default=DEFAULT_OUTPUT)
@@ -153,6 +193,8 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--folds", type=int, default=5)
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--jobs", type=int, default=1, help="Default 1 avoids Mac oversubscription")
+    train.add_argument("--hit-label", type=int, choices=[0, 1], default=1,
+                       help="Which activity label means antiviral hit (default: 1)")
 
     audit = commands.add_parser("audit", help="Check saved split, predictions, and class balance")
     audit.add_argument("--input", required=True, help="Feature table used for training")
@@ -174,11 +216,14 @@ def main(argv: list[str] | None = None) -> None:
             activity_column=args.activity_column, positive_if=args.positive_if,
         )
         invalid_output = args.invalid_output or Path(args.output).with_name("invalid_smiles.csv")
-        save_csv(result.loc[result["standardized_smiles"].isna()], invalid_output)
-        labels = result["activity"].value_counts(dropna=False).to_dict()
-        print(f"Saved {len(result)} rows to {args.output}; "
-              f"invalid SMILES: {result['standardized_smiles'].isna().sum()} "
-              f"(see {invalid_output}); activity counts: {labels}")
+        report_preprocessing(result, args.output, invalid_output)
+    elif args.command == "preprocess-screening":
+        result = run_screening_pipeline(
+            args.input_2024, args.input_2025, args.output,
+            target=args.target, combined_output=args.combined_output,
+        )
+        invalid_output = args.invalid_output or Path(args.output).with_name("invalid_smiles.csv")
+        report_preprocessing(result, args.output, invalid_output)
     elif args.command == "embed-molecular":
         from feature_extraction.common import read_table, save_table
         from feature_extraction.molecular.extract import extract_molecular_features
@@ -226,7 +271,7 @@ def main(argv: list[str] | None = None) -> None:
             protocol=args.protocol, supplementary_column=args.supplementary_column,
             supplementary_boost=args.supplementary_boost,
             redundancy_offset=args.redundancy_offset, mixup_alpha=args.mixup_alpha,
-            mixup_multiplier=args.mixup_multiplier,
+            mixup_multiplier=args.mixup_multiplier, hit_label=args.hit_label,
         )
         print(f"Saved model, CV results, and holdout predictions to {output}")
     elif args.command == "audit":
