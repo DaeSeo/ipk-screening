@@ -1,0 +1,10 @@
+/Data/
+/Main/Data/
+.venv/
+__pycache__/
+*.pyc
+*.pkl
+*.parquet
+.env
+.env.*
+.DS_Store
