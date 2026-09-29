@@ -6,6 +6,21 @@ CSVs, the folder inside `Main/` takes precedence). All commands below
 run from the **project root** (the directory containing both folders). On a
 case-sensitive filesystem rename the downloaded `main/` folder to `Main/`.
 
+The `Data/` subfolders contain `.gitkeep` placeholders so their empty layout
+can be committed to Git without including any research data. From the project
+root, stage only the placeholders and example manifest with:
+
+```bash
+find Data -name .gitkeep -print0 | xargs -0 git add -f --
+git add -f Data/manifests/images.example.csv
+git commit -m "Track empty Data directory structure"
+git push
+```
+
+If the repository's `.gitignore` ignores `Data/`, `git add -f` stages these
+placeholders while leaving actual data files untracked. Keep that ignore rule
+if the directory is meant to contain local datasets and generated outputs.
+
 ## Install
 
 Use Python 3.11 in a clean environment, then:
